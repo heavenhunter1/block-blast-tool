@@ -28,10 +28,18 @@ class Frame(val w: Int, val h: Int, private val data: ByteArray, private val row
         return max((p shr 16) and 0xFF, max((p shr 8) and 0xFF, p and 0xFF))
     }
 
-    fun avg(cx: Int, cy: Int, rad: Int): Int {
-        var s = 0
-        for (dy in -1..1) for (dx in -1..1) s += bright(cx + dx * rad, cy + dy * rad)
-        return s / 9
+    /** Màu trung bình 3x3 điểm quanh (cx, cy): [r, g, b]. */
+    fun avgRgb(cx: Int, cy: Int, rad: Int): IntArray {
+        var r = 0
+        var g = 0
+        var b = 0
+        for (dy in -1..1) for (dx in -1..1) {
+            val p = rgb(cx + dx * rad, cy + dy * rad)
+            r += (p shr 16) and 0xFF
+            g += (p shr 8) and 0xFF
+            b += p and 0xFF
+        }
+        return intArrayOf(r / 9, g / 9, b / 9)
     }
 }
 
@@ -43,18 +51,26 @@ object Detector {
         val ch = (g.by1 - g.by0) / 8f
         val rad = (min(cw, ch) * 0.25f).toInt().coerceAtLeast(1)
 
-        // ---- Bàn cờ: ô có khối sáng, ô trống tối
-        val vals = IntArray(64)
-        for (r in 0 until 8) for (c in 0 until 8) {
-            val cx = (g.bx0 + (c + 0.5f) * cw).toInt()
-            val cy = (g.by0 + (r + 0.5f) * ch).toInt()
-            vals[r * 8 + c] = f.avg(cx, cy, rad)
+        // ---- Bàn cờ: so màu từng ô với màu ô trống (ô tối nhất), dùng được cho mọi giao diện
+        val cols = Array(64) { i ->
+            val r = i / 8
+            val c = i % 8
+            f.avgRgb((g.bx0 + (c + 0.5f) * cw).toInt(), (g.by0 + (r + 0.5f) * ch).toInt(), rad)
         }
-        val lo = vals.min()
-        val hi = vals.max()
-        val thr = if (hi - lo > 60) (lo + hi) / 2 else 140
+        var dark = 0
+        for (i in 1 until 64) if (cols[i].sum() < cols[dark].sum()) dark = i
+        val ref = IntArray(3)
+        var cnt = 0
+        for (i in 0 until 64) {
+            if (colorDist(cols[i], cols[dark]) < 45) {
+                for (k in 0..2) ref[k] += cols[i][k]
+                cnt++
+            }
+        }
+        for (k in 0..2) ref[k] /= cnt
+        val thr = 70
         var board = 0L
-        for (i in 0 until 64) if (vals[i] > thr) board = board or (1L shl i)
+        for (i in 0 until 64) if (colorDist(cols[i], ref) > thr) board = board or (1L shl i)
 
         // ---- 3 khối trong khay: so với màu nền của từng ô khay
         val prior = ratio * (cw + ch) / 2f
@@ -97,12 +113,18 @@ object Detector {
         val bgG = gs[gs.size / 2]
         val bgB = bs[bs.size / 2]
 
-        // 2) Mặt nạ: pixel khác màu nền nhiều -> thuộc khối
+        // 2) Mặt nạ: khối = khác nền nhiều, hoặc lệch hẳn tông màu nền (bóng đổ chỉ tối hơn nên bị loại)
+        val bgNorm = (bgR * bgR + bgG * bgG + bgB * bgB).toFloat().coerceAtLeast(1f)
         val mask = BooleanArray(gw * gh)
         for (j in 0 until gh) for (i in 0 until gw) {
             val p = f.rgb(x0 + i * step, y0 + j * step)
-            val d = abs(((p shr 16) and 0xFF) - bgR) + abs(((p shr 8) and 0xFF) - bgG) + abs((p and 0xFF) - bgB)
-            mask[j * gw + i] = d > 110
+            val pr = (p shr 16) and 0xFF
+            val pg = (p shr 8) and 0xFF
+            val pb = p and 0xFF
+            val d = abs(pr - bgR) + abs(pg - bgG) + abs(pb - bgB)
+            val k = (pr * bgR + pg * bgG + pb * bgB) / bgNorm
+            val res = abs(pr - k * bgR) + abs(pg - k * bgG) + abs(pb - k * bgB)
+            mask[j * gw + i] = d > 110 || (res > 28f && k >= 0.88f)
         }
 
         // 3) Lấy thành phần liên thông lớn nhất (lân cận 5x5 để vượt qua khe giữa các ô)
@@ -178,12 +200,15 @@ object Detector {
             if (cells.map { it.first }.toSet().size != m || cells.map { it.second }.toSet().size != n) continue
             if (!connected(cells)) continue
             val norm = Solver.normalize(cells)
-            var score = abs(sg * step - prior) / prior
+            var score = abs(sg * step - prior) / prior + 2f * abs(sxg - syg) / max(sxg, syg)
             if (norm !in Solver.KNOWN) score += 0.6f
             if (score < bestScore) { bestScore = score; best = norm }
         }
         return best
     }
+
+    private fun colorDist(a: IntArray, b: IntArray): Int =
+        abs(a[0] - b[0]) + abs(a[1] - b[1]) + abs(a[2] - b[2])
 
     private fun connected(cells: List<Pair<Int, Int>>): Boolean {
         val set = cells.toHashSet()
