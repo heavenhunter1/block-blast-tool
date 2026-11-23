@@ -7,7 +7,7 @@ class Prefs(ctx: Context) {
 
     /** Tỉ lệ cỡ ô của khối trong khay so với ô trên bàn cờ. */
     var ratio: Float
-        get() = sp.getFloat("ratio", 0.5f)
+        get() = sp.getFloat("ratio", 0.45f)
         set(v) { sp.edit().putFloat("ratio", v).apply() }
 
     fun loadGeo(w: Int, h: Int): Geo {
